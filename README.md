@@ -15,6 +15,12 @@ streamlit run app.py
 
 최초 실행 시 `data/family_cfo.db`와 샘플 데이터가 자동 생성됩니다. 테스트는 `pytest -q`로 실행합니다.
 
+앱 비밀번호는 공개 코드에 넣지 않습니다. 로컬에서는 환경변수 `APP_PASSWORD`를 사용하고, Streamlit Cloud에서는 App settings의 Secrets에 아래처럼 저장합니다.
+
+```toml
+APP_PASSWORD = "가족 비밀번호"
+```
+
 ## Yahoo Finance 티커
 
 - 미국 주식: `AAPL`, `MSFT`

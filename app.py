@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hmac
+import os
 import sqlite3
 from datetime import date, datetime, timedelta
 
@@ -14,6 +16,35 @@ from utils import calculate_position, cash_summary, format_percent, format_won, 
 
 
 st.set_page_config(page_title="Family CFO", page_icon="🏡", layout="wide", initial_sidebar_state="collapsed")
+
+
+def require_family_password() -> None:
+    try:
+        expected_password = str(st.secrets["APP_PASSWORD"])
+    except (FileNotFoundError, KeyError):
+        expected_password = os.getenv("APP_PASSWORD", "")
+
+    if not expected_password:
+        st.error("앱 비밀번호가 설정되지 않았습니다. 관리자에게 알려주세요.")
+        st.stop()
+    if st.session_state.get("family_authenticated"):
+        return
+
+    st.title("🔒 Family CFO")
+    st.caption("우리 가족 전용 앱입니다")
+    with st.form("family_login"):
+        entered_password = st.text_input("가족 비밀번호", type="password", placeholder="비밀번호 4자리")
+        submitted = st.form_submit_button("들어가기", use_container_width=True)
+    if submitted:
+        if hmac.compare_digest(entered_password, expected_password):
+            st.session_state["family_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("비밀번호가 맞지 않습니다.")
+    st.stop()
+
+
+require_family_password()
 db.initialize_database()
 
 MEMBERS = db.MEMBERS
