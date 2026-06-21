@@ -142,11 +142,34 @@ CREATE TABLE IF NOT EXISTS poll_votes (
 """
 
 
-def initialize_database(db_path: str | Path | None = None, seed: bool = True) -> None:
+def initialize_database(db_path: str | Path | None = None, seed: bool = False) -> None:
     with connection_scope(db_path) as conn:
         conn.executescript(SCHEMA)
-        if seed and conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
+        conn.executemany(
+            "INSERT OR IGNORE INTO users (name, role) VALUES (?, ?)",
+            [(name, "부모") if name in ("아빠", "엄마") else (name, "자녀") for name in MEMBERS],
+        )
+        if seed and conn.execute("SELECT COUNT(*) FROM cash_transactions").fetchone()[0] == 0:
+            conn.execute("DELETE FROM users")
             _seed_sample_data(conn)
+
+
+def remove_initial_demo_data(db_path: str | Path | None = None) -> None:
+    """Remove only the original bundled demo rows, once, without touching user records."""
+    migration = "remove_initial_demo_v1"
+    with connection_scope(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS app_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
+        if conn.execute("SELECT 1 FROM app_migrations WHERE name = ?", (migration,)).fetchone():
+            return
+        conn.execute("DELETE FROM cash_transactions WHERE memo = '초기 가족 공동자금'")
+        conn.execute("DELETE FROM investment_assets WHERE memo = '샘플 투자' AND ticker IN ('005930.KS', 'AAPL', '360750.KS')")
+        conn.execute("DELETE FROM goals WHERE memo IN ('가족여행 준비', '생신 식사와 선물')")
+        conn.execute("DELETE FROM events WHERE memo IN ('저녁 식사', '검진 예약', '케이크 준비')")
+        conn.execute("DELETE FROM tasks WHERE memo IN ('후보 3곳 정리', '이번 달 회비')")
+        conn.execute("DELETE FROM polls WHERE title = '다음 가족모임 메뉴'")
+        conn.execute("INSERT INTO app_migrations (name) VALUES (?)", (migration,))
 
 
 def _seed_sample_data(conn: sqlite3.Connection) -> None:
@@ -240,6 +263,13 @@ def add_cash_transaction(tx_date: str, tx_type: str, member: str, amount: float,
     )
 
 
+def update_cash_transaction(transaction_id: int, tx_date: str, tx_type: str, member: str, amount: float, category: str, memo: str = "", db_path=None) -> None:
+    execute(
+        "UPDATE cash_transactions SET tx_date=?, tx_type=?, member_name=?, amount=?, category=?, memo=? WHERE id=?",
+        (tx_date, tx_type, member, amount, category, memo, transaction_id), db_path,
+    )
+
+
 def add_asset(asset_name: str, ticker: str, market_type: str, currency: str, manual_price: float | None, manual_value: float | None, memo: str = "", db_path=None) -> int:
     return execute(
         "INSERT INTO investment_assets (asset_name, ticker, market_type, currency, manual_current_price, manual_current_value, memo) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -247,10 +277,24 @@ def add_asset(asset_name: str, ticker: str, market_type: str, currency: str, man
     )
 
 
+def update_asset(asset_id: int, asset_name: str, ticker: str, market_type: str, currency: str, manual_price: float | None, manual_value: float | None, memo: str = "", db_path=None) -> None:
+    execute(
+        "UPDATE investment_assets SET asset_name=?, ticker=?, market_type=?, currency=?, manual_current_price=?, manual_current_value=?, memo=? WHERE id=?",
+        (asset_name, ticker.strip().upper(), market_type, currency, manual_price, manual_value, memo, asset_id), db_path,
+    )
+
+
 def add_investment_transaction(asset_id: int, trade_date: str, trade_type: str, quantity: float, unit_price: float, fx_rate: float, total_amount_krw: float, memo: str = "", db_path=None) -> int:
     return execute(
         "INSERT INTO investment_transactions (asset_id, trade_date, trade_type, quantity, unit_price, fx_rate, total_amount_krw, memo) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (asset_id, trade_date, trade_type, quantity, unit_price, fx_rate, total_amount_krw, memo), db_path,
+    )
+
+
+def update_investment_transaction(transaction_id: int, asset_id: int, trade_date: str, trade_type: str, quantity: float, unit_price: float, fx_rate: float, total_amount_krw: float, memo: str = "", db_path=None) -> None:
+    execute(
+        "UPDATE investment_transactions SET asset_id=?, trade_date=?, trade_type=?, quantity=?, unit_price=?, fx_rate=?, total_amount_krw=?, memo=? WHERE id=?",
+        (asset_id, trade_date, trade_type, quantity, unit_price, fx_rate, total_amount_krw, memo, transaction_id), db_path,
     )
 
 
@@ -276,12 +320,24 @@ def add_goal(name: str, target: float, current: float, start: str, target_date: 
     return execute("INSERT INTO goals (goal_name, target_amount, current_amount, start_date, target_date, owner, memo) VALUES (?, ?, ?, ?, ?, ?, ?)", (name, target, current, start, target_date, owner, memo), db_path)
 
 
+def update_goal(goal_id: int, name: str, target: float, current: float, start: str, target_date: str, owner: str, memo: str = "", db_path=None) -> None:
+    execute("UPDATE goals SET goal_name=?, target_amount=?, current_amount=?, start_date=?, target_date=?, owner=?, memo=? WHERE id=?", (name, target, current, start, target_date, owner, memo, goal_id), db_path)
+
+
 def add_event(event_date: str, event_time: str, title: str, event_type: str, participants: str, memo: str = "", db_path=None) -> int:
     return execute("INSERT INTO events (event_date, event_time, title, event_type, participants, memo) VALUES (?, ?, ?, ?, ?, ?)", (event_date, event_time, title, event_type, participants, memo), db_path)
 
 
+def update_event(event_id: int, event_date: str, event_time: str, title: str, event_type: str, participants: str, memo: str = "", db_path=None) -> None:
+    execute("UPDATE events SET event_date=?, event_time=?, title=?, event_type=?, participants=?, memo=? WHERE id=?", (event_date, event_time, title, event_type, participants, memo, event_id), db_path)
+
+
 def add_task(title: str, owner: str, due_date: str, status: str, memo: str = "", db_path=None) -> int:
     return execute("INSERT INTO tasks (title, owner, due_date, status, memo) VALUES (?, ?, ?, ?, ?)", (title, owner, due_date, status, memo), db_path)
+
+
+def update_task(task_id: int, title: str, owner: str, due_date: str, status: str, memo: str = "", db_path=None) -> None:
+    execute("UPDATE tasks SET title=?, owner=?, due_date=?, status=?, memo=? WHERE id=?", (title, owner, due_date, status, memo, task_id), db_path)
 
 
 def update_task_status(task_id: int, status: str, db_path=None) -> None:
@@ -295,8 +351,24 @@ def add_poll(title: str, options: list[str], deadline: str, db_path=None) -> int
         return int(poll_id)
 
 
+def update_poll(poll_id: int, title: str, deadline: str, options: list[str] | None = None, db_path=None) -> None:
+    with connection_scope(db_path) as conn:
+        conn.execute("UPDATE polls SET title=?, deadline=? WHERE id=?", (title, deadline, poll_id))
+        vote_count = conn.execute("SELECT COUNT(*) FROM poll_votes WHERE poll_id=?", (poll_id,)).fetchone()[0]
+        if options is not None and vote_count == 0:
+            conn.execute("DELETE FROM poll_options WHERE poll_id=?", (poll_id,))
+            conn.executemany("INSERT INTO poll_options (poll_id, option_text) VALUES (?, ?)", [(poll_id, option) for option in options])
+
+
 def cast_vote(poll_id: int, option_id: int, voter: str, db_path=None) -> int:
     return execute("INSERT INTO poll_votes (poll_id, option_id, voter_name) VALUES (?, ?, ?)", (poll_id, option_id, voter), db_path)
+
+
+def delete_record(table_name: str, record_id: int, db_path=None) -> None:
+    allowed = {"cash_transactions", "investment_assets", "investment_transactions", "goals", "events", "tasks", "polls"}
+    if table_name not in allowed:
+        raise ValueError("삭제할 수 없는 항목입니다.")
+    execute(f"DELETE FROM {table_name} WHERE id=?", (record_id,), db_path)
 
 
 def table(name: str, order_by: str = "id DESC", db_path=None) -> list[dict[str, Any]]:

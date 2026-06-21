@@ -46,6 +46,7 @@ def require_family_password() -> None:
 
 require_family_password()
 db.initialize_database()
+db.remove_initial_demo_data()
 
 MEMBERS = db.MEMBERS
 DEPOSIT_CATEGORIES = ["가족여행", "부모님 지원", "경조사", "투자금", "기타"]
@@ -240,6 +241,35 @@ def render_cash() -> None:
     if not cash_df.empty:
         display = cash_df[["tx_date", "tx_type", "member_name", "amount", "category", "memo"]].rename(columns={"tx_date":"날짜","tx_type":"구분","member_name":"가족","amount":"금액","category":"분류","memo":"메모"})
         st.dataframe(display, use_container_width=True, hide_index=True)
+        with st.expander("거래 수정·삭제", expanded=False):
+            choices = {f'{tx["tx_date"]} · {tx["tx_type"]} · {tx["member_name"]} · {format_won(tx["amount"])} (#{tx["id"]})': tx for tx in cash}
+            selected_label = st.selectbox("수정할 거래", list(choices), key="cash_edit_select")
+            selected_tx = choices[selected_label]
+            all_categories = list(dict.fromkeys(DEPOSIT_CATEGORIES + EXPENSE_CATEGORIES))
+            with st.form("cash_edit_form"):
+                edit_type = st.radio("구분", ["입금", "지출"], index=["입금", "지출"].index(selected_tx["tx_type"]), horizontal=True)
+                cols = st.columns(2)
+                edit_date = cols[0].date_input("날짜", date.fromisoformat(selected_tx["tx_date"]))
+                edit_member = cols[1].selectbox("가족", MEMBERS, index=MEMBERS.index(selected_tx["member_name"]))
+                edit_amount = st.number_input("금액", min_value=1.0, value=float(selected_tx["amount"]), step=10_000.0)
+                edit_category = st.selectbox("분류", all_categories, index=all_categories.index(selected_tx["category"]) if selected_tx["category"] in all_categories else 0)
+                edit_memo = st.text_input("메모", value=selected_tx["memo"])
+                confirm_delete = st.checkbox("이 거래를 삭제합니다")
+                c1, c2, c3 = st.columns(3)
+                save = c1.form_submit_button("수정 저장", use_container_width=True)
+                delete = c2.form_submit_button("삭제", use_container_width=True)
+                cancel = c3.form_submit_button("취소", use_container_width=True)
+                if save:
+                    db.update_cash_transaction(int(selected_tx["id"]), edit_date.isoformat(), edit_type, edit_member, edit_amount, edit_category, edit_memo)
+                    st.rerun()
+                if delete:
+                    if confirm_delete:
+                        db.delete_record("cash_transactions", int(selected_tx["id"]))
+                        st.rerun()
+                    else:
+                        st.warning("삭제 확인에 체크해 주세요.")
+                if cancel:
+                    st.info("변경하지 않았습니다.")
 
 
 def render_investments() -> None:
@@ -333,6 +363,81 @@ def render_investments() -> None:
                     db.update_asset_manual_value(int(asset["id"]), manual_price or None, manual_value or None)
                     st.success("평가값을 저장했습니다.")
                     st.rerun()
+        with st.expander("투자상품 정보 수정·삭제", expanded=False):
+            selected = st.selectbox("수정할 상품", list(name_to_id), key="asset_edit_select")
+            asset = next(a for a in assets if int(a["id"]) == name_to_id[selected])
+            with st.form("asset_edit_form"):
+                edit_name = st.text_input("투자상품명", value=asset["asset_name"])
+                cols = st.columns(2)
+                edit_ticker = cols[0].text_input("티커", value=asset["ticker"])
+                edit_market = cols[1].selectbox("시장 구분", MARKETS, index=MARKETS.index(asset["market_type"]) if asset["market_type"] in MARKETS else len(MARKETS)-1)
+                edit_currency = "USD" if edit_market == "미국주식" else "KRW"
+                cols = st.columns(2)
+                edit_manual_price = cols[0].number_input("수동 현재가", min_value=0.0, value=float(asset["manual_current_price"] or 0))
+                edit_manual_value = cols[1].number_input("수동 평가금액", min_value=0.0, value=float(asset["manual_current_value"] or 0))
+                edit_memo = st.text_input("투자 메모", value=asset["memo"])
+                confirm_delete = st.checkbox("상품과 모든 거래를 삭제합니다")
+                c1, c2, c3 = st.columns(3)
+                save = c1.form_submit_button("수정 저장", use_container_width=True)
+                delete = c2.form_submit_button("삭제", use_container_width=True)
+                cancel = c3.form_submit_button("취소", use_container_width=True)
+                if save:
+                    if not edit_name.strip() or (edit_market not in MANUAL_MARKETS and not edit_ticker.strip()):
+                        st.error("상품명과 티커를 확인해 주세요.")
+                    else:
+                        db.update_asset(int(asset["id"]), edit_name.strip(), edit_ticker, edit_market, edit_currency, edit_manual_price or None, edit_manual_value or None, edit_memo)
+                        st.rerun()
+                if delete:
+                    if confirm_delete:
+                        db.delete_record("investment_assets", int(asset["id"]))
+                        st.rerun()
+                    else:
+                        st.warning("삭제 확인에 체크해 주세요.")
+                if cancel:
+                    st.info("변경하지 않았습니다.")
+
+        investment_trades = records("investment_transactions", "trade_date DESC, id DESC")
+        if investment_trades:
+            with st.expander("매수·매도 내역 수정·삭제", expanded=False):
+                assets_by_id = {int(a["id"]): a for a in assets}
+                trade_choices = {
+                    f'{t["trade_date"]} · {assets_by_id[int(t["asset_id"])]["asset_name"]} · {t["trade_type"]} {t["quantity"]:g} (#{t["id"]})': t
+                    for t in investment_trades if int(t["asset_id"]) in assets_by_id
+                }
+                selected_trade = trade_choices[st.selectbox("수정할 거래", list(trade_choices), key="investment_trade_edit_select")]
+                selected_asset = assets_by_id[int(selected_trade["asset_id"])]
+                with st.form("investment_trade_edit_form"):
+                    edit_trade_type = st.radio("구분", ["매수", "매도"], index=["매수", "매도"].index(selected_trade["trade_type"]), horizontal=True)
+                    cols = st.columns(2)
+                    edit_trade_date = cols[0].date_input("거래일", date.fromisoformat(selected_trade["trade_date"]))
+                    edit_quantity = cols[1].number_input("수량", min_value=0.0001, value=float(selected_trade["quantity"]), format="%.4f")
+                    cols = st.columns(2)
+                    edit_unit_price = cols[0].number_input(f'거래 단가 ({selected_asset["currency"]})', min_value=0.0, value=float(selected_trade["unit_price"]))
+                    edit_fx_rate = cols[1].number_input("거래 당시 환율", min_value=1.0, value=float(selected_trade["fx_rate"]), disabled=selected_asset["currency"] == "KRW")
+                    edit_total = st.number_input("거래 총액 (원)", min_value=1.0, value=float(selected_trade["total_amount_krw"]))
+                    edit_memo = st.text_input("메모", value=selected_trade["memo"])
+                    confirm_delete = st.checkbox("이 투자 거래를 삭제합니다")
+                    c1, c2, c3 = st.columns(3)
+                    save = c1.form_submit_button("수정 저장", use_container_width=True)
+                    delete = c2.form_submit_button("삭제", use_container_width=True)
+                    cancel = c3.form_submit_button("취소", use_container_width=True)
+                    if save:
+                        candidate_trades = [t.copy() for t in investment_trades if int(t["asset_id"]) == int(selected_trade["asset_id"]) and int(t["id"]) != int(selected_trade["id"])]
+                        candidate_trades.append({"id": int(selected_trade["id"]), "trade_date": edit_trade_date.isoformat(), "trade_type": edit_trade_type, "quantity": edit_quantity, "total_amount_krw": edit_total})
+                        try:
+                            calculate_position(candidate_trades)
+                            db.update_investment_transaction(int(selected_trade["id"]), int(selected_trade["asset_id"]), edit_trade_date.isoformat(), edit_trade_type, edit_quantity, edit_unit_price, edit_fx_rate, edit_total, edit_memo)
+                            st.rerun()
+                        except ValueError as exc:
+                            st.error(str(exc))
+                    if delete:
+                        if confirm_delete:
+                            db.delete_record("investment_transactions", int(selected_trade["id"]))
+                            st.rerun()
+                        else:
+                            st.warning("삭제 확인에 체크해 주세요.")
+                    if cancel:
+                        st.info("변경하지 않았습니다.")
 
 
 def render_goals() -> None:
@@ -355,6 +460,39 @@ def render_goals() -> None:
                 st.success("가족 목표를 저장했습니다.")
                 st.rerun()
     goals = records("goals", "target_date ASC")
+    if goals:
+        with st.expander("목표 수정·삭제", expanded=False):
+            goal_choices = {f'{g["goal_name"]} · {format_won(g["target_amount"])} (#{g["id"]})': g for g in goals}
+            selected_goal = goal_choices[st.selectbox("수정할 목표", list(goal_choices), key="goal_edit_select")]
+            with st.form("goal_edit_form"):
+                edit_name = st.text_input("목표명", value=selected_goal["goal_name"])
+                cols = st.columns(2)
+                edit_target = cols[0].number_input("목표금액", min_value=1.0, value=float(selected_goal["target_amount"]))
+                edit_current = cols[1].number_input("현재 적립금", min_value=0.0, value=float(selected_goal["current_amount"]))
+                cols = st.columns(2)
+                edit_start = cols[0].date_input("시작일", date.fromisoformat(selected_goal["start_date"]))
+                edit_target_date = cols[1].date_input("목표일", date.fromisoformat(selected_goal["target_date"]))
+                edit_owner = st.selectbox("담당자", MEMBERS, index=MEMBERS.index(selected_goal["owner"]))
+                edit_memo = st.text_input("메모", value=selected_goal["memo"])
+                confirm_delete = st.checkbox("이 목표를 삭제합니다")
+                c1, c2, c3 = st.columns(3)
+                save = c1.form_submit_button("수정 저장", use_container_width=True)
+                delete = c2.form_submit_button("삭제", use_container_width=True)
+                cancel = c3.form_submit_button("취소", use_container_width=True)
+                if save:
+                    if not edit_name.strip() or edit_target_date < edit_start:
+                        st.error("목표명과 날짜를 확인해 주세요.")
+                    else:
+                        db.update_goal(int(selected_goal["id"]), edit_name.strip(), edit_target, edit_current, edit_start.isoformat(), edit_target_date.isoformat(), edit_owner, edit_memo)
+                        st.rerun()
+                if delete:
+                    if confirm_delete:
+                        db.delete_record("goals", int(selected_goal["id"]))
+                        st.rerun()
+                    else:
+                        st.warning("삭제 확인에 체크해 주세요.")
+                if cancel:
+                    st.info("변경하지 않았습니다.")
     for goal in goals:
         metrics = goal_metrics(goal["target_amount"], goal["current_amount"], goal["start_date"], goal["target_date"])
         st.subheader(goal["goal_name"])
@@ -385,6 +523,39 @@ def render_events() -> None:
                 st.success("일정을 저장했습니다.")
                 st.rerun()
     events = records("events", "event_date ASC, event_time ASC")
+    if events:
+        with st.expander("일정 수정·삭제", expanded=False):
+            event_choices = {f'{e["event_date"]} {e["event_time"]} · {e["title"]} (#{e["id"]})': e for e in events}
+            selected_event = event_choices[st.selectbox("수정할 일정", list(event_choices), key="event_edit_select")]
+            current_participants = [m for m in MEMBERS if m in selected_event["participants"]]
+            with st.form("event_edit_form"):
+                edit_title = st.text_input("일정명", value=selected_event["title"])
+                cols = st.columns(2)
+                edit_date = cols[0].date_input("날짜", date.fromisoformat(selected_event["event_date"]))
+                edit_time = cols[1].time_input("시간", datetime.strptime(selected_event["event_time"] or "12:00", "%H:%M").time())
+                event_types = ["생일", "병원", "여행", "가족모임", "납부일", "기타"]
+                edit_type = st.selectbox("유형", event_types, index=event_types.index(selected_event["event_type"]) if selected_event["event_type"] in event_types else len(event_types)-1)
+                edit_participants = st.multiselect("참석자", MEMBERS, default=current_participants)
+                edit_memo = st.text_input("메모", value=selected_event["memo"])
+                confirm_delete = st.checkbox("이 일정을 삭제합니다")
+                c1, c2, c3 = st.columns(3)
+                save = c1.form_submit_button("수정 저장", use_container_width=True)
+                delete = c2.form_submit_button("삭제", use_container_width=True)
+                cancel = c3.form_submit_button("취소", use_container_width=True)
+                if save:
+                    if edit_title.strip():
+                        db.update_event(int(selected_event["id"]), edit_date.isoformat(), edit_time.strftime("%H:%M"), edit_title.strip(), edit_type, ", ".join(edit_participants), edit_memo)
+                        st.rerun()
+                    else:
+                        st.error("일정명을 입력해 주세요.")
+                if delete:
+                    if confirm_delete:
+                        db.delete_record("events", int(selected_event["id"]))
+                        st.rerun()
+                    else:
+                        st.warning("삭제 확인에 체크해 주세요.")
+                if cancel:
+                    st.info("변경하지 않았습니다.")
     today_events = [e for e in events if e["event_date"] == date.today().isoformat()]
     st.subheader("오늘 일정")
     if not today_events:
@@ -419,6 +590,7 @@ def render_tasks() -> None:
                 st.error("할 일 제목을 입력해 주세요.")
     owner_filter = st.selectbox("담당자별 보기", ["전체"] + MEMBERS)
     tasks = records("tasks", "due_date ASC")
+    all_tasks = tasks.copy()
     if owner_filter != "전체":
         tasks = [t for t in tasks if t["owner"] == owner_filter]
     for task in tasks:
@@ -430,6 +602,37 @@ def render_tasks() -> None:
             if cols[2].button("변경", key=f'task_btn_{task["id"]}', use_container_width=True):
                 db.update_task_status(int(task["id"]), new_status)
                 st.rerun()
+    if all_tasks:
+        with st.expander("할 일 수정·삭제", expanded=False):
+            task_choices = {f'{t["due_date"]} · {t["title"]} (#{t["id"]})': t for t in all_tasks}
+            selected_task = task_choices[st.selectbox("수정할 할 일", list(task_choices), key="task_edit_select")]
+            statuses = ["예정", "진행중", "완료"]
+            with st.form("task_edit_form"):
+                edit_title = st.text_input("할 일 제목", value=selected_task["title"])
+                cols = st.columns(2)
+                edit_owner = cols[0].selectbox("담당자", MEMBERS, index=MEMBERS.index(selected_task["owner"]))
+                edit_due = cols[1].date_input("마감일", date.fromisoformat(selected_task["due_date"]))
+                edit_status = st.selectbox("상태", statuses, index=statuses.index(selected_task["status"]))
+                edit_memo = st.text_input("메모", value=selected_task["memo"])
+                confirm_delete = st.checkbox("이 할 일을 삭제합니다")
+                c1, c2, c3 = st.columns(3)
+                save = c1.form_submit_button("수정 저장", use_container_width=True)
+                delete = c2.form_submit_button("삭제", use_container_width=True)
+                cancel = c3.form_submit_button("취소", use_container_width=True)
+                if save:
+                    if edit_title.strip():
+                        db.update_task(int(selected_task["id"]), edit_title.strip(), edit_owner, edit_due.isoformat(), edit_status, edit_memo)
+                        st.rerun()
+                    else:
+                        st.error("할 일 제목을 입력해 주세요.")
+                if delete:
+                    if confirm_delete:
+                        db.delete_record("tasks", int(selected_task["id"]))
+                        st.rerun()
+                    else:
+                        st.warning("삭제 확인에 체크해 주세요.")
+                if cancel:
+                    st.info("변경하지 않았습니다.")
 
 
 def render_polls() -> None:
@@ -447,6 +650,36 @@ def render_polls() -> None:
                 st.success("투표를 만들었습니다.")
                 st.rerun()
     polls = records("polls", "deadline DESC")
+    if polls:
+        with st.expander("투표 수정·삭제", expanded=False):
+            poll_choices = {f'{p["deadline"]} · {p["title"]} (#{p["id"]})': p for p in polls}
+            selected_poll = poll_choices[st.selectbox("수정할 투표", list(poll_choices), key="poll_edit_select")]
+            existing_options = db.fetch_all("SELECT option_text FROM poll_options WHERE poll_id=? ORDER BY id", (selected_poll["id"],))
+            vote_count = db.fetch_one("SELECT COUNT(*) AS count FROM poll_votes WHERE poll_id=?", (selected_poll["id"],))["count"]
+            with st.form("poll_edit_form"):
+                edit_title = st.text_input("투표 제목", value=selected_poll["title"])
+                edit_options_text = st.text_area("선택지 (투표 전만 수정 가능)", value="\n".join(o["option_text"] for o in existing_options), disabled=vote_count > 0)
+                edit_deadline = st.date_input("마감일", date.fromisoformat(selected_poll["deadline"]))
+                confirm_delete = st.checkbox("투표와 모든 응답을 삭제합니다")
+                c1, c2, c3 = st.columns(3)
+                save = c1.form_submit_button("수정 저장", use_container_width=True)
+                delete = c2.form_submit_button("삭제", use_container_width=True)
+                cancel = c3.form_submit_button("취소", use_container_width=True)
+                if save:
+                    new_options = list(dict.fromkeys(x.strip() for x in edit_options_text.splitlines() if x.strip()))
+                    if not edit_title.strip() or (vote_count == 0 and len(new_options) < 2):
+                        st.error("제목과 선택지 2개 이상을 확인해 주세요.")
+                    else:
+                        db.update_poll(int(selected_poll["id"]), edit_title.strip(), edit_deadline.isoformat(), new_options if vote_count == 0 else None)
+                        st.rerun()
+                if delete:
+                    if confirm_delete:
+                        db.delete_record("polls", int(selected_poll["id"]))
+                        st.rerun()
+                    else:
+                        st.warning("삭제 확인에 체크해 주세요.")
+                if cancel:
+                    st.info("변경하지 않았습니다.")
     for poll in polls:
         st.subheader(poll["title"])
         options = db.fetch_all("SELECT * FROM poll_options WHERE poll_id = ? ORDER BY id", (poll["id"],))
